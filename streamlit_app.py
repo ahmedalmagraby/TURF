@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from itertools import combinations
 import math
 import io
+import re
 
 # Page configuration
 st.set_page_config(
@@ -78,8 +79,8 @@ def generate_simulated_data(n_respondents=200, n_items=12, seed=42):
     data = np.random.binomial(1, np.random.uniform(0.15, 0.45, n_items), 
                               (n_respondents, n_items))
     
-    # Create column names
-    columns = [f"Item_{chr(65+i)}" for i in range(n_items)]
+    # Create column names — safe for any n_items (Item_01, Item_02, ...)
+    columns = [f"Item_{i+1:02d}" for i in range(n_items)]
     
     df = pd.DataFrame(data, columns=columns)
     return df
@@ -97,19 +98,38 @@ def load_data(uploaded_file):
     except Exception as e:
         return None, f"Error loading file: {str(e)}"
 
+def _is_id_column(col_name):
+    """Check if a column name looks like an ID or demographic column using word-boundary matching."""
+    name = col_name.lower().strip()
+    # Exact matches or word-boundary matches to avoid false positives like "humidity", "lipid"
+    id_patterns = [
+        r'\bid\b', r'\bindex\b', r'\brespondent\b', r'\buser\b', r'\bcustomer\b',
+        r'\bdemographic\b', r'\btimestamp\b',
+    ]
+    return any(re.search(pattern, name) for pattern in id_patterns)
+
 def validate_and_clean_data(df, selected_columns):
     """Validate and clean the data to ensure it's binary."""
     # Use only selected columns
     df_selected = df[selected_columns].copy()
     
     # Check if data is numeric
-    numeric_cols = df_selected.select_dtypes(include=[np.number]).columns
+    numeric_cols = df_selected.select_dtypes(include=[np.number]).columns.tolist()
+    non_numeric_cols = [c for c in selected_columns if c not in numeric_cols]
+    
+    if non_numeric_cols:
+        st.warning(f"⚠️ The following selected columns are non-numeric and were excluded: {', '.join(non_numeric_cols)}")
     
     if len(numeric_cols) == 0:
         return None, "No numeric columns found in the selected data."
     
     # Use only numeric columns
     df_numeric = df_selected[numeric_cols].copy()
+    
+    # Warn about NaN before any processing
+    nan_count = df_numeric.isna().sum().sum()
+    if nan_count > 0:
+        st.warning(f"⚠️ {nan_count} missing value(s) found and will be treated as 0 (not selected).")
     
     # Check for non-binary values
     unique_values = set()
@@ -125,14 +145,15 @@ def validate_and_clean_data(df, selected_columns):
             non_binary_str = str(non_binary)
         st.warning(f"⚠️ Non-binary values detected: {non_binary_str}. Converting values >0 to 1, and values ≤0 to 0.")
         # Coerce to binary
+        df_numeric = df_numeric.fillna(0)
         df_numeric = (df_numeric > 0).astype(int)
-    
-    # Ensure all values are 0 or 1
-    df_numeric = df_numeric.fillna(0).astype(int)
+    else:
+        # Ensure all values are 0 or 1
+        df_numeric = df_numeric.fillna(0).astype(int)
     
     return df_numeric, None
 
-# Cache TURF calculation
+# Cache TURF calculation — no st.* calls inside
 @st.cache_data
 def calculate_turf(df, k, max_combinations=10000):
     """
@@ -144,7 +165,9 @@ def calculate_turf(df, k, max_combinations=10000):
     - max_combinations: Maximum number of combinations to evaluate
     
     Returns:
-    - DataFrame with columns: Combination, Reach, Frequency
+    - results_df: DataFrame with columns: Combination, Reach, Frequency
+    - is_sampled: bool
+    - theoretical_combos: int
     """
     items = df.columns.tolist()
     n_items = len(items)
@@ -160,8 +183,6 @@ def calculate_turf(df, k, max_combinations=10000):
     
     # Check if we need to sample
     if theoretical_combos > max_combinations:
-        st.warning(f"⚠️ Total possible combinations: {theoretical_combos:,}. Evaluating a random sample of {max_combinations:,}.")
-        
         # Generate random sample of combinations without creating full list
         np.random.seed(42)
         sampled_indices = set()
@@ -179,25 +200,14 @@ def calculate_turf(df, k, max_combinations=10000):
         combo_indices = list(combinations(range(n_items), k))
         is_sampled = False
     
-    # Progress bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
     total_combos = len(combo_indices)
     
     for idx, indices in enumerate(combo_indices):
-        # Update progress dynamically to avoid UI lag safely
-        mod_val = max(100, total_combos // 100)
-        if idx % mod_val == 0 or idx == total_combos - 1:
-            progress = (idx + 1) / total_combos
-            progress_bar.progress(progress)
-            status_text.text(f"Analyzing combination {idx + 1:,} of {total_combos:,}...")
-        
         # Get subset of data for this combination
         subset = df_values[:, indices]
         
         # Reach: Number of respondents with at least one 1 (Logical OR) using fast numpy any
-        reach_count = np.count_nonzero(np.any(subset, axis=1))
+        reach_count = int(np.count_nonzero(np.any(subset, axis=1)))
         reach_pct = (reach_count / n_respondents) * 100
         
         # Frequency: Total sum of 1s across all items
@@ -207,21 +217,10 @@ def calculate_turf(df, k, max_combinations=10000):
         
         results.append({
             'Combination': ' + '.join(combo_names),
-            'Items': combo_names,
             'Reach (%)': round(reach_pct, 2),
             'Reach (Count)': reach_count,
             'Frequency': frequency
         })
-    
-    # Clear progress indicators
-    progress_bar.empty()
-    status_text.empty()
-    
-    # Add info about sampling
-    if is_sampled:
-        st.info(f"ℹ️ Analyzed {max_combinations:,} random combinations out of {theoretical_combos:,} possible. Results represent a statistical sample.")
-    else:
-        st.info(f"ℹ️ Analyzed all {theoretical_combos:,} possible combinations.")
     
     # Convert to DataFrame and sort
     results_df = pd.DataFrame(results)
@@ -230,7 +229,7 @@ def calculate_turf(df, k, max_combinations=10000):
         ascending=[False, False]
     ).reset_index(drop=True)
     
-    return results_df
+    return results_df, is_sampled, theoretical_combos
 
 # Main app logic
 st.header("1️⃣ Data Source Selection")
@@ -284,15 +283,14 @@ else:  # Upload Own Data
             
             all_columns = df_raw.columns.tolist()
             
-            # Try to detect potential ID or demographic columns
-            potential_id_cols = [col for col in all_columns if 
-                               any(keyword in col.lower() for keyword in ['id', 'respondent', 'user', 'customer', 'index', 'demographic', 'age', 'gender', 'income'])]
+            # Detect potential ID columns using word-boundary matching
+            potential_id_cols = [col for col in all_columns if _is_id_column(col)]
             
             # Default to columns that are NOT potential ID columns
             default_cols = [col for col in all_columns if col not in potential_id_cols]
             
             if potential_id_cols:
-                st.warning(f"⚠️ Potential ID or Demographic columns detected and excluded by default: {', '.join(potential_id_cols)}.")
+                st.warning(f"⚠️ Potential ID/metadata columns detected and excluded by default: {', '.join(potential_id_cols)}.")
             
             selected_columns = st.multiselect(
                 "Select columns to include in TURF analysis:",
@@ -358,12 +356,31 @@ if df is not None:
         theoretical_combos = math.comb(len(df.columns), k)
         st.metric("Possible Combinations", f"{theoretical_combos:,}")
     
-    # Run analysis button
+    # Run analysis button — store results in session_state so they persist across re-runs
     if st.button("🚀 Run TURF Analysis", type="primary", use_container_width=True):
+        with st.spinner("Calculating TURF metrics..."):
+            results_df, is_sampled, theo_combos = calculate_turf(df, k)
+        st.session_state['turf_results'] = results_df
+        st.session_state['turf_is_sampled'] = is_sampled
+        st.session_state['turf_theo_combos'] = theo_combos
+        st.session_state['turf_k'] = k
+        st.session_state['turf_n_respondents'] = len(df)
+    
+    # Display results from session_state (survives re-runs)
+    if 'turf_results' in st.session_state:
+        results_df = st.session_state['turf_results']
+        is_sampled = st.session_state['turf_is_sampled']
+        theo_combos = st.session_state['turf_theo_combos']
+        stored_k = st.session_state['turf_k']
+        n_respondents = st.session_state['turf_n_respondents']
+        
         st.header("3️⃣ Analysis Results")
         
-        with st.spinner("Calculating TURF metrics..."):
-            results_df = calculate_turf(df, k)
+        # Sampling info
+        if is_sampled:
+            st.info(f"ℹ️ Analyzed {len(results_df):,} random combinations out of {theo_combos:,} possible (k={stored_k}). Results represent a statistical sample.")
+        else:
+            st.info(f"ℹ️ Analyzed all {theo_combos:,} possible combinations (k={stored_k}).")
         
         # Top result interpretation
         if len(results_df) > 0:
@@ -381,7 +398,7 @@ if df is not None:
             - This combination reaches **{reach_pct}%** of your audience
             - That means only **{not_reached_pct:.1f}%** of respondents selected none of these items
             - Total selections across these items: **{top_result['Frequency']}**
-            - Number of unique respondents reached: **{top_result['Reach (Count)']} out of {len(df)}**
+            - Number of unique respondents reached: **{top_result['Reach (Count)']} out of {n_respondents}**
             """)
             
             # Display top 20 results
@@ -421,7 +438,7 @@ if df is not None:
             ))
             
             fig.update_layout(
-                title=f'Top 15 Combinations by Reach (Portfolio Size: {k})',
+                title=f'Top 15 Combinations by Reach (Portfolio Size: {stored_k})',
                 xaxis_title='Reach (%)',
                 yaxis_title='Combination',
                 height=500,
@@ -437,7 +454,7 @@ if df is not None:
             st.download_button(
                 label="Download Full Results as CSV",
                 data=csv,
-                file_name=f"turf_analysis_k{k}_results.csv",
+                file_name=f"turf_analysis_k{stored_k}_results.csv",
                 mime="text/csv",
                 use_container_width=True
             )
