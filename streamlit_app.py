@@ -119,7 +119,11 @@ def validate_and_clean_data(df, selected_columns):
     non_binary = [v for v in unique_values if v not in [0, 1, 0.0, 1.0]]
     
     if non_binary:
-        st.warning(f"⚠️ Non-binary values detected: {non_binary}. Converting values >0 to 1, and values ≤0 to 0.")
+        if len(non_binary) > 10:
+            non_binary_str = str(non_binary[:10])[:-1] + ", ...]"
+        else:
+            non_binary_str = str(non_binary)
+        st.warning(f"⚠️ Non-binary values detected: {non_binary_str}. Converting values >0 to 1, and values ≤0 to 0.")
         # Coerce to binary
         df_numeric = (df_numeric > 0).astype(int)
     
@@ -149,6 +153,9 @@ def calculate_turf(df, k, max_combinations=10000):
     # Calculate theoretical number of combinations using math.comb
     theoretical_combos = math.comb(n_items, k)
     
+    # Use numpy array for much faster operations
+    df_values = df.to_numpy()
+    
     results = []
     
     # Check if we need to sample
@@ -157,48 +164,50 @@ def calculate_turf(df, k, max_combinations=10000):
         
         # Generate random sample of combinations without creating full list
         np.random.seed(42)
-        sampled_combos = set()
+        sampled_indices = set()
         
         # Keep sampling until we have enough unique combinations
-        while len(sampled_combos) < max_combinations:
-            # Randomly select k items
-            random_indices = np.random.choice(n_items, k, replace=False)
-            combo = tuple(sorted([items[i] for i in random_indices]))
-            sampled_combos.add(combo)
+        while len(sampled_indices) < max_combinations:
+            # Randomly select k items by index
+            random_idx = tuple(sorted(np.random.choice(n_items, k, replace=False)))
+            sampled_indices.add(random_idx)
         
-        all_combos = list(sampled_combos)
+        combo_indices = list(sampled_indices)
         is_sampled = True
     else:
-        # Generate all combinations
-        all_combos = list(combinations(items, k))
+        # Generate all combination indices
+        combo_indices = list(combinations(range(n_items), k))
         is_sampled = False
     
     # Progress bar
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    total_combos = len(all_combos)
+    total_combos = len(combo_indices)
     
-    for idx, combo in enumerate(all_combos):
-        # Update progress every 100 iterations or at the end
-        if idx % 100 == 0 or idx == total_combos - 1:
+    for idx, indices in enumerate(combo_indices):
+        # Update progress dynamically to avoid UI lag safely
+        mod_val = max(100, total_combos // 100)
+        if idx % mod_val == 0 or idx == total_combos - 1:
             progress = (idx + 1) / total_combos
             progress_bar.progress(progress)
             status_text.text(f"Analyzing combination {idx + 1:,} of {total_combos:,}...")
         
         # Get subset of data for this combination
-        subset = df[list(combo)]
+        subset = df_values[:, indices]
         
-        # Reach: Number of respondents with at least one 1 (Logical OR)
-        reach_count = (subset.sum(axis=1) > 0).sum()
+        # Reach: Number of respondents with at least one 1 (Logical OR) using fast numpy any
+        reach_count = np.count_nonzero(np.any(subset, axis=1))
         reach_pct = (reach_count / n_respondents) * 100
         
         # Frequency: Total sum of 1s across all items
-        frequency = subset.sum().sum()
+        frequency = int(subset.sum())
+        
+        combo_names = tuple(items[i] for i in indices)
         
         results.append({
-            'Combination': ' + '.join(combo),
-            'Items': combo,
+            'Combination': ' + '.join(combo_names),
+            'Items': combo_names,
             'Reach (%)': round(reach_pct, 2),
             'Reach (Count)': reach_count,
             'Frequency': frequency
@@ -275,18 +284,20 @@ else:  # Upload Own Data
             
             all_columns = df_raw.columns.tolist()
             
-            # Try to detect potential ID columns
+            # Try to detect potential ID or demographic columns
             potential_id_cols = [col for col in all_columns if 
-                               any(keyword in col.lower() for keyword in ['id', 'respondent', 'user', 'customer', 'index'])]
+                               any(keyword in col.lower() for keyword in ['id', 'respondent', 'user', 'customer', 'index', 'demographic', 'age', 'gender', 'income'])]
+            
+            # Default to columns that are NOT potential ID columns
+            default_cols = [col for col in all_columns if col not in potential_id_cols]
             
             if potential_id_cols:
-                st.warning(f"⚠️ Potential ID columns detected: {', '.join(potential_id_cols)}. Consider excluding these.")
+                st.warning(f"⚠️ Potential ID or Demographic columns detected and excluded by default: {', '.join(potential_id_cols)}.")
             
-            # Default to all columns selected
             selected_columns = st.multiselect(
                 "Select columns to include in TURF analysis:",
                 options=all_columns,
-                default=all_columns,
+                default=default_cols,
                 help="Choose only the item/product columns. Uncheck ID columns and demographics."
             )
             
@@ -334,7 +345,7 @@ if df is not None:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        max_k = min(len(df.columns), 10)
+        max_k = max(2, min(len(df.columns), 12))
         k = st.slider(
             "Maximum Portfolio Size (k)",
             min_value=2,
