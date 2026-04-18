@@ -442,15 +442,15 @@ if df is not None:
 #  UI — Results
 # ══════════════════════════════════════════════════════════════════════════════
 if 'turf_results' in st.session_state:
-    res_df        = st.session_state['turf_results']
-    is_sampled    = st.session_state['turf_is_sampled']
-    theo_combos   = st.session_state['turf_theo_combos']
-    coverage      = st.session_state['turf_coverage']
-    stored_k      = st.session_state['turf_k']
-    n_resp        = st.session_state['turf_n']
-    g_portfolio   = st.session_state['turf_greedy_portfolio']
-    g_curve       = st.session_state['turf_greedy_curve']
-    g_marginal    = st.session_state['turf_greedy_marginal']
+    res_df        = st.session_state.get('turf_results', pd.DataFrame())
+    is_sampled    = st.session_state.get('turf_is_sampled', False)
+    theo_combos   = st.session_state.get('turf_theo_combos', 0)
+    coverage      = st.session_state.get('turf_coverage', 100.0)
+    stored_k      = st.session_state.get('turf_k', 0)
+    n_resp        = st.session_state.get('turf_n', 0)
+    g_portfolio   = st.session_state.get('turf_greedy_portfolio', [])
+    g_curve       = st.session_state.get('turf_greedy_curve', [])
+    g_marginal    = st.session_state.get('turf_greedy_marginal', [])
 
     st.header("3️⃣ Analysis Results")
 
