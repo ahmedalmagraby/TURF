@@ -799,18 +799,38 @@ if 'turf_results' in st.session_state:
             rows = []
             mi_count = len(st.session_state.get('turf_must_include', []))
             for step_i, item in enumerate(g_portfolio):
-                reach_after = g_curve[step_i + 1] if step_i + 1 < len(g_curve) else g_curve[-1]
-                gain = g_marginal[step_i] if step_i < len(g_marginal) else 0.0
                 locked = "✅ must-include" if step_i < mi_count else ""
-                gain_count = round(gain / 100 * n_resp) if isinstance(gain, (int, float)) else "—"
-                rows.append({
-                    'Step': step_i + 1,
-                    'Item Added': item,
-                    'Cumulative Reach (%)': reach_after,
-                    'Incremental Reach (%)': gain if step_i >= mi_count else "—",
-                    'Incremental Reach (Count)': gain_count if step_i >= mi_count else "—",
-                    'Note': locked,
-                })
+
+                if step_i < mi_count:
+                    # Must-include items are added as a bundle before greedy
+                    # starts; show the baseline reach (g_curve[0]).
+                    reach_after = g_curve[0]
+                    rows.append({
+                        'Step': step_i + 1,
+                        'Item Added': item,
+                        'Cumulative Reach (%)': reach_after,
+                        'Incremental Reach (%)': "—",
+                        'Incremental Reach (Count)': "—",
+                        'Note': locked,
+                    })
+                else:
+                    # Greedy items: 0-based index into the greedy portion
+                    greedy_idx = step_i - mi_count
+                    reach_after = (g_curve[greedy_idx + 1]
+                                   if greedy_idx + 1 < len(g_curve)
+                                   else g_curve[-1])
+                    gain = (g_marginal[greedy_idx]
+                            if greedy_idx < len(g_marginal)
+                            else 0.0)
+                    gain_count = round(gain / 100 * n_resp)
+                    rows.append({
+                        'Step': step_i + 1,
+                        'Item Added': item,
+                        'Cumulative Reach (%)': reach_after,
+                        'Incremental Reach (%)': gain,
+                        'Incremental Reach (Count)': gain_count,
+                        'Note': locked,
+                    })
             greedy_df = pd.DataFrame(rows)
             st.dataframe(greedy_df, use_container_width=True, hide_index=True)
 
