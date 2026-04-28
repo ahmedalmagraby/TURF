@@ -209,6 +209,112 @@ def calculate_turf(df: pd.DataFrame, k: int,
     return results_df, is_sampled, theoretical_combos, coverage_pct
 
 
+# ── Individual reach ──────────────────────────────────────────────────────────
+@st.cache_data
+def individual_reach(df: pd.DataFrame, must_exclude: tuple = ()):
+    """
+    Compute standalone reach of every item (excluding must-exclude items).
+
+    Returns
+    -------
+    reach_df : pd.DataFrame  — columns: Item, Reach (%), Reach (Count)
+    """
+    n = len(df)
+    rows = []
+    for col in df.columns:
+        if col in must_exclude:
+            continue
+        count = int((df[col] > 0).sum())
+        rows.append({
+            'Item': col,
+            'Reach (%)': round(count / n * 100, 2),
+            'Reach (Count)': count,
+        })
+    return (pd.DataFrame(rows)
+            .sort_values('Reach (%)', ascending=False)
+            .reset_index(drop=True))
+
+
+# ── Optimal combination at each portfolio size ────────────────────────────────
+@st.cache_data
+def optimal_by_size(df: pd.DataFrame, max_k: int,
+                    must_include: tuple = (),
+                    must_exclude: tuple = (),
+                    max_combinations: int = 15000):
+    """
+    For each portfolio size 1..max_k, find the best combination by reach.
+    Uses exact search when feasible, falls back to the greedy solution otherwise.
+
+    Returns
+    -------
+    summary_df : pd.DataFrame — one row per portfolio size with:
+        Size, Combination, Reach (%), Reach (Count), Incremental Reach (%)
+    """
+    all_items = df.columns.tolist()
+    candidate_items = [it for it in all_items
+                       if it not in must_exclude and it not in must_include]
+    mi = list(must_include)
+    n = len(df)
+    arr = df.to_numpy(dtype=np.int8)
+    item_idx = {it: i for i, it in enumerate(all_items)}
+
+    # Greedy solution as fallback (always available)
+    g_portfolio, g_curve, _ = greedy_turf(df, max_k, must_include, must_exclude)
+
+    rows = []
+    prev_reach = 0.0
+    for size in range(1, max_k + 1):
+        extra_k = size - len(mi)
+
+        # Sizes smaller than must-include count are invalid
+        if extra_k < 0:
+            continue
+        if extra_k > len(candidate_items):
+            break
+
+        theo = math.comb(len(candidate_items), extra_k)
+
+        if theo <= max_combinations:
+            # Exact search
+            res_df, _, _, _ = calculate_turf(
+                df, size,
+                must_include=must_include,
+                must_exclude=must_exclude,
+                max_combinations=max_combinations,
+            )
+            if len(res_df) > 0:
+                best = res_df.iloc[0]
+                combo = best['Combination']
+                reach_pct = best['Reach (%)']
+                reach_cnt = best['Reach (Count)']
+            else:
+                continue
+        else:
+            # Use greedy approximation for this size
+            if size <= len(g_portfolio):
+                items_at_size = g_portfolio[:size]
+                combo = ' + '.join(items_at_size)
+                idxs = [item_idx[it] for it in items_at_size]
+                reached = np.any(arr[:, idxs], axis=1).sum()
+                reach_pct = round(reached / n * 100, 2)
+                reach_cnt = int(reached)
+            else:
+                continue
+
+        inc = round(reach_pct - prev_reach, 2)
+        rows.append({
+            'Size': size,
+            'Combination': combo,
+            'Reach (%)': reach_pct,
+            'Reach (Count)': reach_cnt,
+            'Incremental Reach (%)': inc,
+            'Method': 'Exact' if theo <= max_combinations else 'Greedy approx.',
+        })
+        prev_reach = reach_pct
+
+    return pd.DataFrame(rows)
+
+
 # ── Greedy sequential TURF ────────────────────────────────────────────────────
 @st.cache_data
 def greedy_turf(df: pd.DataFrame, max_k: int,
@@ -406,6 +512,10 @@ if df is not None:
         cfg_hash = hashlib.md5(cfg.encode()).hexdigest()
 
         if st.button("🚀 Run TURF Analysis", type="primary", use_container_width=True):
+            with st.spinner("Computing individual reach..."):
+                ind_reach_df = individual_reach(
+                    df, must_exclude=tuple(must_exclude),
+                )
             with st.spinner("Running full TURF analysis..."):
                 res_df, is_sampled, theo_combos, coverage = calculate_turf(
                     df, k,
@@ -414,6 +524,12 @@ if df is not None:
                 )
             with st.spinner("Running greedy sequential analysis..."):
                 g_portfolio, g_reach_curve, g_marginal = greedy_turf(
+                    df, max_k,
+                    must_include=tuple(must_include),
+                    must_exclude=tuple(must_exclude),
+                )
+            with st.spinner("Finding optimal combinations by portfolio size..."):
+                opt_size_df = optimal_by_size(
                     df, max_k,
                     must_include=tuple(must_include),
                     must_exclude=tuple(must_exclude),
@@ -430,6 +546,8 @@ if df is not None:
                 'turf_greedy_marginal': g_marginal,
                 'turf_cfg_hash': cfg_hash,
                 'turf_must_include': must_include,
+                'turf_individual_reach': ind_reach_df,
+                'turf_optimal_by_size': opt_size_df,
             })
 
         # ── Stale results banner ──────────────────────────────────────────────
@@ -451,6 +569,8 @@ if 'turf_results' in st.session_state:
     g_portfolio   = st.session_state.get('turf_greedy_portfolio', [])
     g_curve       = st.session_state.get('turf_greedy_curve', [])
     g_marginal    = st.session_state.get('turf_greedy_marginal', [])
+    ind_reach_df  = st.session_state.get('turf_individual_reach', pd.DataFrame())
+    opt_size_df   = st.session_state.get('turf_optimal_by_size', pd.DataFrame())
 
     st.header("3️⃣ Analysis Results")
 
@@ -462,9 +582,140 @@ if 'turf_results' in st.session_state:
     else:
         st.info(f"ℹ️ Exhaustive search: all {theo_combos:,} combination(s) evaluated (k={stored_k}).")
 
-    tab_full, tab_greedy, tab_curve = st.tabs(
-        ["🏆 Top Combinations", "🪜 Greedy Path", "📈 Reach Curve"]
+    tab_individual, tab_optimal_size, tab_full, tab_greedy, tab_curve = st.tabs(
+        ["📍 Individual Reach", "🔢 Optimal by Size", "🏆 Top Combinations",
+         "🪜 Greedy Path", "📈 Reach Curve"]
     )
+
+    # ── Tab: Individual Reach ─────────────────────────────────────────────────
+    with tab_individual:
+        st.subheader("📍 Individual Touchpoint Reach")
+        st.markdown("""
+        Standalone reach of **each individual touchpoint** — the percentage of respondents
+        reached by that item alone, independent of any other items.
+        """)
+
+        if len(ind_reach_df) == 0:
+            st.info("No items to display (all may be excluded).")
+        else:
+            # Metrics row for top-3
+            top3 = ind_reach_df.head(3)
+            cols = st.columns(min(3, len(top3)))
+            for i, (_, row) in enumerate(top3.iterrows()):
+                cols[i].metric(
+                    label=row['Item'],
+                    value=f"{row['Reach (%)']:.1f}%",
+                    help=f"{row['Reach (Count)']} of {n_resp} respondents",
+                )
+
+            st.dataframe(
+                ind_reach_df,
+                use_container_width=True, hide_index=True,
+            )
+
+            # Horizontal bar chart
+            chart_df = ind_reach_df.iloc[::-1]  # ascending order for horizontal bar
+            fig_ind = go.Figure(go.Bar(
+                y=chart_df['Item'],
+                x=chart_df['Reach (%)'],
+                orientation='h',
+                text=chart_df['Reach (%)'].map(lambda x: f'{x:.1f}%'),
+                textposition='auto',
+                marker=dict(
+                    color=chart_df['Reach (%)'],
+                    colorscale='Teal',
+                    showscale=False,
+                ),
+                hovertemplate='<b>%{y}</b><br>Reach: %{x:.2f}%<extra></extra>',
+            ))
+            fig_ind.update_layout(
+                title='Standalone Reach per Touchpoint',
+                xaxis_title='Reach (%)',
+                yaxis_title='',
+                height=max(350, len(ind_reach_df) * 30),
+                margin=dict(l=10, r=20, t=50, b=40),
+            )
+            st.plotly_chart(fig_ind, use_container_width=True)
+
+            st.download_button(
+                label="⬇️ Download Individual Reach as CSV",
+                data=ind_reach_df.to_csv(index=False),
+                file_name="turf_individual_reach.csv",
+                mime="text/csv",
+            )
+
+    # ── Tab: Optimal by portfolio size ────────────────────────────────────────
+    with tab_optimal_size:
+        st.subheader("🔢 Optimal Combinations by Portfolio Size")
+        st.markdown("""
+        The **best combination** at each portfolio size (1, 2, 3, …) and exactly how much
+        **incremental reach** is gained by adding one more touchpoint to the optimal set.
+        Use this to decide the ideal portfolio size — where the incremental gain no longer
+        justifies the cost of another item.
+        """)
+
+        if len(opt_size_df) == 0:
+            st.info("No data to display.")
+        else:
+            st.dataframe(
+                opt_size_df,
+                use_container_width=True, hide_index=True,
+            )
+
+            # Dual-axis chart: reach line + incremental bar
+            fig_opt = go.Figure()
+            fig_opt.add_trace(go.Scatter(
+                x=opt_size_df['Size'],
+                y=opt_size_df['Reach (%)'],
+                mode='lines+markers+text',
+                name='Reach (%)',
+                text=opt_size_df['Reach (%)'].map(lambda x: f'{x:.1f}%'),
+                textposition='top center',
+                line=dict(color='steelblue', width=3),
+                marker=dict(size=9),
+            ))
+            fig_opt.add_trace(go.Bar(
+                x=opt_size_df['Size'],
+                y=opt_size_df['Incremental Reach (%)'],
+                name='Incremental Reach (%)',
+                opacity=0.45,
+                marker_color='coral',
+                yaxis='y2',
+                text=opt_size_df['Incremental Reach (%)'].map(lambda x: f'+{x:.1f}%'),
+                textposition='outside',
+                hovertemplate='Size %{x}: +%{y:.2f}%<extra></extra>',
+            ))
+            fig_opt.update_layout(
+                xaxis=dict(
+                    title='Portfolio Size',
+                    tickmode='array',
+                    tickvals=opt_size_df['Size'].tolist(),
+                ),
+                yaxis=dict(title='Cumulative Reach (%)', range=[0, 105]),
+                yaxis2=dict(title='Incremental Reach (%)', overlaying='y',
+                            side='right', showgrid=False, range=[0, max(opt_size_df['Incremental Reach (%)'].max() * 1.5, 10)]),
+                legend=dict(x=0.01, y=0.99),
+                height=500,
+                title='Optimal Reach by Portfolio Size with Incremental Gains',
+                hovermode='x unified',
+            )
+            st.plotly_chart(fig_opt, use_container_width=True)
+
+            # Highlight diminishing returns
+            if len(opt_size_df) > 1:
+                inc_vals = opt_size_df['Incremental Reach (%)'].tolist()
+                cutoff_idx = next((i for i, v in enumerate(inc_vals[1:], 1) if v < 2.0), None)
+                if cutoff_idx is not None:
+                    rec_size = int(opt_size_df.iloc[cutoff_idx - 1]['Size'])
+                    st.info(f"💡 **Diminishing returns detected:** incremental reach drops below 2% "
+                            f"after portfolio size {rec_size}. Consider {rec_size} items as the sweet spot.")
+
+            st.download_button(
+                label="⬇️ Download Optimal-by-Size as CSV",
+                data=opt_size_df.to_csv(index=False),
+                file_name="turf_optimal_by_size.csv",
+                mime="text/csv",
+            )
 
     # ── Tab 1: Full TURF results ──────────────────────────────────────────────
     with tab_full:
@@ -529,13 +780,16 @@ if 'turf_results' in st.session_state:
                 use_container_width=True
             )
 
-    # ── Tab 2: Greedy path ────────────────────────────────────────────────────
+    # ── Tab: Greedy path ──────────────────────────────────────────────────────
     with tab_greedy:
         st.subheader("🪜 Greedy Sequential Portfolio")
         st.markdown("""
         The greedy algorithm builds a portfolio **one item at a time**, always picking the 
         item that adds the most new respondents. This is exact (no sampling) and shows 
-        which items contribute the most incremental reach.
+        which items contribute the most **incremental reach**.
+
+        The **Incremental Reach** column shows exactly how much *unique, unduplicated* 
+        reach each touchpoint contributes on top of all previously selected items.
         """)
 
         if not g_portfolio:
@@ -548,11 +802,13 @@ if 'turf_results' in st.session_state:
                 reach_after = g_curve[step_i + 1] if step_i + 1 < len(g_curve) else g_curve[-1]
                 gain = g_marginal[step_i] if step_i < len(g_marginal) else 0.0
                 locked = "✅ must-include" if step_i < mi_count else ""
+                gain_count = round(gain / 100 * n_resp) if isinstance(gain, (int, float)) else "—"
                 rows.append({
                     'Step': step_i + 1,
                     'Item Added': item,
                     'Cumulative Reach (%)': reach_after,
-                    'Marginal Gain (%)': gain if step_i >= mi_count else "—",
+                    'Incremental Reach (%)': gain if step_i >= mi_count else "—",
+                    'Incremental Reach (Count)': gain_count if step_i >= mi_count else "—",
                     'Note': locked,
                 })
             greedy_df = pd.DataFrame(rows)
