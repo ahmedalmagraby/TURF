@@ -166,15 +166,19 @@ def calculate_turf(df: pd.DataFrame, k: int,
     theoretical_combos = math.comb(len(candidate_items), extra_k)
 
     if theoretical_combos > max_combinations:
+        # Cap unique sampling at 75% of the total space to avoid the
+        # coupon-collector stall when theoretical_combos ≈ max_combinations.
+        safe_max = min(max_combinations, int(theoretical_combos * 0.75))
+
         rng = np.random.default_rng(42)
         cand_idx_list = list(range(len(candidate_items)))
         sampled = set()
-        while len(sampled) < max_combinations:
+        while len(sampled) < safe_max:
             draw = tuple(sorted(rng.choice(cand_idx_list, extra_k, replace=False).tolist()))
             sampled.add(draw)
         extra_combo_indices = list(sampled)
         is_sampled = True
-        coverage_pct = round(max_combinations / theoretical_combos * 100, 1)
+        coverage_pct = round(safe_max / theoretical_combos * 100, 1)
     else:
         extra_combo_indices = list(combinations(range(len(candidate_items)), extra_k))
         is_sampled = False
@@ -202,6 +206,29 @@ def calculate_turf(df: pd.DataFrame, k: int,
             'Reach (Count)': reach_count,
             'Frequency': frequency,
         })
+
+    # When sampling, inject the greedy solution so the "Top Combinations"
+    # tab never reports a worse best than the greedy / optimal-by-size tabs.
+    if is_sampled:
+        g_portfolio, _, _ = greedy_turf(
+            df, k, must_include=must_include, must_exclude=must_exclude,
+        )
+        if len(g_portfolio) >= k:
+            greedy_items = g_portfolio[:k]
+            greedy_combo = ' + '.join(greedy_items)
+            # Only inject if this combination isn't already in the results
+            if greedy_combo not in [r['Combination'] for r in results]:
+                g_idx = [item_to_idx[it] for it in greedy_items]
+                g_reached = np.any(df_arr[:, g_idx], axis=1)
+                g_reach_count = int(g_reached.sum())
+                g_reach_pct = round(g_reach_count / n_respondents * 100, 2)
+                g_frequency = int(df_arr[:, g_idx].sum())
+                results.append({
+                    'Combination': greedy_combo,
+                    'Reach (%)': g_reach_pct,
+                    'Reach (Count)': g_reach_count,
+                    'Frequency': g_frequency,
+                })
 
     results_df = (pd.DataFrame(results)
                   .sort_values(['Reach (%)', 'Frequency'], ascending=[False, False])
@@ -346,12 +373,13 @@ def greedy_turf(df: pd.DataFrame, max_k: int,
     marginal_gains = []
 
     for _ in range(min(max_k, len(remaining))):
-        best_item, best_gain, best_covered = None, -1, covered
+        best_item, best_gain, best_freq, best_covered = None, -1, -1, covered
         for cand in remaining:
             new_covered = covered | arr[:, item_idx[cand]].astype(bool)
             gain = new_covered.sum() - covered.sum()
-            if gain > best_gain:
-                best_gain, best_item, best_covered = gain, cand, new_covered
+            cand_freq = int(arr[:, item_idx[cand]].sum())
+            if gain > best_gain or (gain == best_gain and cand_freq > best_freq):
+                best_gain, best_item, best_freq, best_covered = gain, cand, cand_freq, new_covered
         if best_item is None:
             break
         portfolio.append(best_item)
