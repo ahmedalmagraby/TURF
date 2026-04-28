@@ -372,7 +372,11 @@ def greedy_turf(df: pd.DataFrame, max_k: int,
     reach_curve = [round(covered.sum() / n * 100, 2)]  # baseline
     marginal_gains = []
 
-    for _ in range(min(max_k, len(remaining))):
+    # max_k is the *total* portfolio size (including must-include items).
+    # The greedy phase only needs to fill the remaining slots.
+    greedy_slots = max(0, max_k - len(portfolio))
+
+    for _ in range(min(greedy_slots, len(remaining))):
         best_item, best_gain, best_freq, best_covered = None, -1, -1, covered
         for cand in remaining:
             new_covered = covered | arr[:, item_idx[cand]].astype(bool)
