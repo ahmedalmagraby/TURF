@@ -1,0 +1,11 @@
+[server]
+headless = true
+# Uploaded survey files are held in memory; cap their size (MB). Streamlit's default is 200.
+maxUploadSize = 50
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"
